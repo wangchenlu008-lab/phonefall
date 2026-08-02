@@ -1,6 +1,6 @@
 /**
  * ============================================================
- *  小手机 — Roche 异世界通信终端插件 v1.0.1
+ *  小手机 — Roche 异世界通信终端插件 v1.0.2
  *  
  *  功能：
  *  - 悬浮球入口，SVG小手机图标，可拖拽，位置持久化
@@ -377,32 +377,33 @@
   }
   // ========== 悬浮球 ==========
   function createFloatingBall() {
-    // 【修复 BUG】：为了防止热重载时旧悬浮球残留导致下面的 if 触发并丢失 S.ball 引用，
-    // 我们在这里先静默清理一下旧 DOM。这绝对不会影响你的任何功能。
+    // 强制清理由于热重载导致的残留 DOM，防止后面的 if 提前退出导致 BUG
     var oldExisting = document.querySelector('.roche-phone-ball');
     if (oldExisting) oldExisting.remove();
 
-    if (document.querySelector('.roche-phone-ball')) return; // 【保留你的原始代码，绝对不删】
+    if (document.querySelector('.roche-phone-ball')) return;
     
     var ball = document.createElement('div');
     ball.className = 'roche-phone-ball';
     ball.innerHTML = PHONE_SVG + '<div class="roche-phone-ball-badge is-empty">0</div>';
     applyBallPosition(ball);
 
-    // 新增：区分单击和双击，使用短延迟防止冲突
+    // 标准点击防抖：防止双击时触发两次单击事件
     var clickTimer = null;
     ball.addEventListener('click', function (e) {
       if (S.dragging) return;
       if (clickTimer) clearTimeout(clickTimer);
       clickTimer = setTimeout(function() {
         togglePanel();
+        clickTimer = null;
       }, 250);
     });
 
-    // 新增功能：双击悬浮球，自动截图当前网页发给角色，生成AI对话
+    // 新增：双击悬浮球，自动截取屏幕发送并触发AI聊天
     ball.addEventListener('dblclick', function(e) {
       e.stopPropagation();
-      if (clickTimer) clearTimeout(clickTimer);
+      if (S.dragging) return;
+      if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
       captureScreenAndChat();
     });
 
@@ -424,17 +425,20 @@
 
   // ========== 视觉对话 (双击悬浮球截图给AI) ==========
   async function captureScreenAndChat() {
+    console.log('[小手机] 触发双击截屏');
     if (!S.currentCharId) {
-      if (S.roche && S.roche.ui) S.roche.ui.toast('请先选择一个角色');
+      if (S.roche && S.roche.ui) S.roche.ui.toast('请先在小手机里选择一个角色');
       return;
     }
-    if (S.roche && S.roche.ui) S.roche.ui.toast('正在获取屏幕...');
 
     var video = document.querySelector('#roche-phone-mirror-video');
     var streamToStop = null;
+    var videoEl = video;
 
-    // 如果没有开启桌宠屏幕监控，临时申请一次屏幕权限来截图
+    // 如果当前没有开启常驻桌宠监控，则需要临时申请一次屏幕权限
     if (!S.mirrorStream || !video || !video.srcObject) {
+      console.log('[小手机] 临时请求屏幕权限');
+      if (S.roche && S.roche.ui) S.roche.ui.toast('正在请求获取屏幕画面...');
       try {
         var stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
         var tempVid = document.createElement('video');
@@ -442,35 +446,37 @@
         tempVid.muted = true;
         tempVid.srcObject = stream;
         await new Promise(function(resolve) { tempVid.onplaying = resolve; });
-        video = tempVid;
+        videoEl = tempVid;
         streamToStop = stream;
       } catch (e) {
-        console.warn('[小手机] 视觉获取屏幕失败:', e);
+        console.warn('[小手机] 获取屏幕失败:', e);
         if (S.roche && S.roche.ui) S.roche.ui.toast('已取消或无屏幕权限');
         return;
       }
     }
 
-    // 将视频帧绘制到 Canvas 转为 base64 图片
+    if (S.roche && S.roche.ui) S.roche.ui.toast('正在截帧并呼叫角色...');
+    
+    // 将视频画面绘制并转为 base64
     var canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 720;
+    canvas.width = videoEl.videoWidth || 1280;
+    canvas.height = videoEl.videoHeight || 720;
     var ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
     var dataUrl = canvas.toDataURL('image/jpeg', 0.6);
 
+    // 如果是临时开启的权限，截图后马上关闭
     if (streamToStop) {
       streamToStop.getTracks().forEach(function(t) { t.stop(); });
     }
 
-    if (S.roche && S.roche.ui) S.roche.ui.toast('已发送屏幕画面给角色，等待回复...');
-
-    // 拼装上下文，调用 AI 视觉对话
+    // 调用 Roche AI 视觉对话
     try {
        var char = await S.roche.character.get(S.currentCharId);
        var persona = char ? (char.persona || char.bio || "") : "";
-       var sysPrompt = "你现在的身份是：" + (char ? (char.name || '未知角色') : '小助手') + "。\n" + persona + "\n\n用户给你发了一张他当前电脑屏幕的实时截图。请观察截图内容，以符合你人设的口吻，在手机聊天里给用户发一条简短的信息，评论一下他在看什么或在干什么。像普通的聊天短消息一样。";
+       var sysPrompt = "你现在的身份是：" + (char ? (char.name || '未知角色') : '小助手') + "。\n" + persona + "\n\n用户给你发了一张他当前电脑屏幕的实时截图。请仔细观察截图内容，以符合你人设的口吻，在手机聊天里给用户发一条简短的信息，评论一下他在看什么或在干什么。请像普通的聊天短消息一样，不要太长。";
 
+       console.log('[小手机] 发起 AI 请求...');
        var res = await S.roche.ai.chat({
          messages: [
            { role: 'system', content: sysPrompt },
@@ -481,6 +487,7 @@
          ]
        });
 
+       console.log('[小手机] AI 返回:', res);
        if (res && res.text) {
          var msg = {
            id: genId(),
@@ -499,7 +506,7 @@
        }
     } catch (e) {
        console.error('[小手机] AI视觉请求失败:', e);
-       if (S.roche && S.roche.ui) S.roche.ui.toast('生成对话失败，请检查模型是否支持视觉(Vision)');
+       if (S.roche && S.roche.ui) S.roche.ui.toast('对话生成失败！请检查 manifest.json 中是否有 ai:chat 权限，或模型是否支持视觉(Vision)。');
     }
   }
 
@@ -527,11 +534,10 @@
 
   // ========== 聊天面板 ==========
   function createChatPanel() {
-    // 同样静默清理可能残留的旧面板DOM，防止原代码的 return 导致新功能(电视机图标)不渲染
     var oldExistingPanel = document.querySelector('.roche-phone-panel');
     if (oldExistingPanel) oldExistingPanel.remove();
 
-    if (document.querySelector('.roche-phone-panel')) return; // 【保留你的原始代码，绝对不删】
+    if (document.querySelector('.roche-phone-panel')) return;
     
     var panel = document.createElement('div');
     panel.className = 'roche-phone-panel is-hidden';
@@ -649,6 +655,7 @@
       video.srcObject = null;
     }
   }
+
   // ========== 角色选择器 ==========
   function toggleCharPicker() {
     S.isCharPickerOpen = !S.isCharPickerOpen;
@@ -711,7 +718,7 @@
 
   // ========== 注册 ==========
   window.RochePlugin.register({
-    id: PLUGIN_ID, name: '小手机', version: '1.0.1',
+    id: PLUGIN_ID, name: '小手机', version: '1.0.2',
     apps: [{
       id: APP_ID, name: '小手机', icon: 'phone_iphone', iconImage: '',
       async mount(container, roche) {
@@ -759,7 +766,7 @@
           await saveState();
         });
 
-        console.log('[小手机] 插件已加载 v1.0.1');
+        console.log('[小手机] 插件已加载 v1.0.2');
       },
       async unmount(container) {
         for (var i = 0; i < S.intervals.length; i++) { var item = S.intervals[i]; if (item && typeof item.disconnect === 'function') item.disconnect(); else clearInterval(item); }
